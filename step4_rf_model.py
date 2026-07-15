@@ -16,7 +16,7 @@ import argparse
 import json
 import os
 import warnings
-import shap
+#import shap #Also moving this one to the main pipeline
 
 import matplotlib
 matplotlib.use("Agg")
@@ -198,6 +198,9 @@ def run(receptor_name: str, bioactivity_type: str | None = None) -> str:
 
     # SHAP analysis
     print("  Running SHAP analysis...")
+    print("Importing SHAP")
+    import shap
+    print("SHAP imported, performing analysis...")
 
     feature_names = [f"bit_{i}" for i in range(config.MORGAN_NBITS)]
 

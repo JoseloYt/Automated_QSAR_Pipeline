@@ -34,11 +34,13 @@ import time
 
 import config
 
-import step1_fetch_chembl
-import step2_preprocess
-import step3_eda_lipinski
-import step4_rf_model
-import step5_chemprop_model
+#Heavy imports so I'll make them lazy importing them in the main function
+#import step1_fetch_chembl
+#import step2_preprocess
+#import step3_eda_lipinski
+#import step4_rf_model
+#import step5_chemprop_model 
+import importlib
 
 
 # ---------------------------------------------------------------------
@@ -204,19 +206,19 @@ def main():
     pipeline_steps = [
         (
             "Step 1 - Fetch ChEMBL Data",
-            step1_fetch_chembl.run,
+            "step1_fetch_chembl",
         ),
         (
             "Step 2 - Preprocessing",
-            step2_preprocess.run,
+            "step2_preprocess",
         ),
         (
             "Step 3 - EDA & Lipinski",
-            step3_eda_lipinski.run,
+            "step3_eda_lipinski",
         ),
         (
             "Step 4 - Random Forest",
-            step4_rf_model.run,
+            "step4_rf_model",
         ),
     ]
 
@@ -224,7 +226,7 @@ def main():
         pipeline_steps.append(
             (
                 "Step 5 - Chemprop",
-                step5_chemprop_model.run,
+                "step5_chemprop_model",
             )
         )
 
@@ -232,12 +234,14 @@ def main():
     # Execute pipeline
     # ---------------------------------------------------------
 
-    for name, func in pipeline_steps:
+    for name, module_name in pipeline_steps:
+
+        mod = importlib.import_module(module_name)
 
         results[name] = execute_step(
             logger,
             name,
-            func,
+            mod.run,
             receptor,
             bioactivity,
         )
