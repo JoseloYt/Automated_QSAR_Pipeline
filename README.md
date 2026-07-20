@@ -1,43 +1,43 @@
-# Pipeline Automatizado de QSAR (ChEMBL → Modelos Predictivos)
+# Automated QSAR Pipeline (ChEMBL → Predictive Models)
 
-Este proyecto implementa un pipeline completo y automatizado para construir modelos de **QSAR** (Quantitative Structure-Activity Relationship) a partir de datos de bioactividad extraídos de **ChEMBL**. Dado el nombre de un receptor/diana biológica (por ejemplo `FGFR1`), el pipeline:
+This project implements a complete, automated pipeline for building **QSAR** (Quantitative Structure-Activity Relationship) models from bioactivity data pulled from **ChEMBL**. Given the name of a receptor/biological target (e.g. `FGFR1`), the pipeline:
 
-1. Descarga los datos de bioactividad desde ChEMBL.
-2. Los limpia y preprocesa (incluyendo conversión a pIC50).
-3. Realiza un análisis exploratorio (EDA) con descriptores de Lipinski.
-4. Entrena un modelo de **Random Forest** sobre huellas moleculares de Morgan, con interpretabilidad SHAP.
-5. Entrena opcionalmente un modelo de **red neuronal de grafos (Chemprop / MPNN)**.
-6. Permite predecir la bioactividad de moléculas nuevas con los modelos entrenados.
+1. Downloads bioactivity data from ChEMBL.
+2. Cleans and preprocesses it (including pIC50 conversion).
+3. Runs exploratory data analysis (EDA) with Lipinski descriptors.
+4. Trains a **Random Forest** model on Morgan fingerprints, with SHAP interpretability.
+5. Optionally trains a **graph neural network (Chemprop / MPNN)** model.
+6. Allows predicting bioactivity for new molecules using the trained models.
 
-Todo el flujo se puede ejecutar de un solo golpe con `run_pipeline.py`, o paso a paso ejecutando cada script individualmente.
-
----
-
-## Índice
-
-- [Estructura del proyecto](#estructura-del-proyecto)
-- [Requisitos](#requisitos)
-- [Configuración (`config.py`)](#configuración-configpy)
-- [Descripción de cada script](#descripción-de-cada-script)
-- [Cómo usar el pipeline](#cómo-usar-el-pipeline)
-- [Archivos de salida generados](#archivos-de-salida-generados)
-- [Predicción sobre moléculas nuevas](#predicción-sobre-moléculas-nuevas)
-- [Notas y consideraciones](#notas-y-consideraciones)
+The whole flow can be run in one shot with `run_pipeline.py`, or step by step by running each script individually.
 
 ---
 
-## Estructura del proyecto
+## Table of Contents
+
+- [Project Structure](#project-structure)
+- [Requirements](#requirements)
+- [Configuration (`config.py`)](#configuration-configpy)
+- [Script Descriptions](#script-descriptions)
+- [How to Use the Pipeline](#how-to-use-the-pipeline)
+- [Generated Output Files](#generated-output-files)
+- [Predicting New Molecules](#predicting-new-molecules)
+- [Notes and Considerations](#notes-and-considerations)
+
+---
+
+## Project Structure
 
 ```
 .
-├── config.py                  # Configuración central de todo el pipeline
-├── step1_fetch_chembl.py      # Paso 1: descarga de datos desde ChEMBL
-├── step2_preprocess.py        # Paso 2: limpieza y preprocesado
-├── step3_eda_lipinski.py      # Paso 3: EDA + descriptores de Lipinski
-├── step4_rf_model.py          # Paso 4: modelo Random Forest + SHAP
-├── step5_chemprop_model.py    # Paso 5: modelo Chemprop (MPNN)
-├── predict.py                 # Predicción sobre moléculas nuevas
-├── run_pipeline.py             # Orquestador que ejecuta todos los pasos
+├── config.py                  # Central configuration for the whole pipeline
+├── step1_fetch_chembl.py      # Step 1: fetch data from ChEMBL
+├── step2_preprocess.py        # Step 2: cleaning and preprocessing
+├── step3_eda_lipinski.py      # Step 3: EDA + Lipinski descriptors
+├── step4_rf_model.py          # Step 4: Random Forest model + SHAP
+├── step5_chemprop_model.py    # Step 5: Chemprop (MPNN) model
+├── predict.py                 # Prediction for new molecules
+├── run_pipeline.py             # Orchestrator that runs every step
 └── output/
     └── <RECEPTOR>/
         ├── 01_raw_data.csv
@@ -50,176 +50,176 @@ Todo el flujo se puede ejecutar de un solo golpe con `run_pipeline.py`, o paso a
         └── predictions/
 ```
 
-Cada receptor consultado genera su propia carpeta dentro de `output/`, de modo que se pueden procesar múltiples dianas sin que se pisen los resultados entre sí.
+Each queried receptor gets its own folder under `output/`, so multiple targets can be processed without results overwriting each other.
 
 ---
 
-## Requisitos
+## Requirements
 
-El proyecto depende principalmente de:
+The project mainly depends on:
 
 - `pandas`, `numpy`, `scipy`
-- `rdkit` (manipulación y validación de moléculas)
-- `chembl_webresource_client` (acceso a la API de ChEMBL)
-- `scikit-learn` (Random Forest, métricas, split de datos)
-- `shap` (interpretabilidad del modelo Random Forest)
-- `matplotlib`, `seaborn` (gráficos)
-- `joblib` (serialización del modelo RF)
-- `Pillow` (composición de imágenes en `predict.py`)
-- `chemprop` (v2) y `lightning` + `torch` — **solo necesarios si se usa el Paso 5**
+- `rdkit` (molecule handling and validation)
+- `chembl_webresource_client` (access to the ChEMBL API)
+- `scikit-learn` (Random Forest, metrics, data splitting)
+- `shap` (Random Forest model interpretability)
+- `matplotlib`, `seaborn` (plots)
+- `joblib` (RF model serialization)
+- `Pillow` (image composition in `predict.py`)
+- `chemprop` (v2) and `lightning` + `torch` — **only needed if Step 5 is used**
 
-Instalación orientativa:
+Suggested installation:
 
 ```bash
 pip install pandas numpy scipy rdkit chembl_webresource_client scikit-learn \
             shap matplotlib seaborn joblib pillow
 
-# Solo si vas a entrenar el modelo Chemprop:
+# Only if you're going to train the Chemprop model:
 pip install chemprop lightning torch
 ```
 
-> Los imports de Chemprop/Lightning/Torch son "perezosos" (lazy imports dentro de la función `run()`), así que el resto del pipeline funciona aunque no tengas esas librerías instaladas, salvo que quieras ejecutar el Paso 5.
+> Chemprop/Lightning/Torch imports are "lazy" (imported inside the `run()` function), so the rest of the pipeline works even without those libraries installed, unless you want to run Step 5.
 
 ---
 
-## Configuración (`config.py`)
+## Configuration (`config.py`)
 
-Todos los parámetros ajustables del pipeline están centralizados en `config.py`, para no tener que tocar el código de cada paso:
+Every tunable parameter of the pipeline is centralized in `config.py`, so you don't need to touch the code of each step:
 
-| Parámetro | Descripción |
+| Parameter | Description |
 |---|---|
-| `BIOACTIVITY_TYPE` | Tipo de bioactividad a descargar de ChEMBL (`IC50`, `Ki`, `EC50`, etc.) |
-| `ORGANISM` | Organismo objetivo (por defecto `"Homo sapiens"`) |
-| `TARGET_TYPE` | Tipo de diana ChEMBL (por defecto `"SINGLE PROTEIN"`) |
-| `CONVERT_TO_PIC50` | Si se convierte el valor crudo a pIC50 (solo aplica a IC50/Ki) |
-| `ACTIVE_THRESHOLD` / `INACTIVE_THRESHOLD` | Umbrales de pIC50 para clasificar como activo/inactivo/intermedio |
-| `MORGAN_RADIUS` / `MORGAN_NBITS` | Parámetros de las huellas moleculares de Morgan para el RF |
-| `RF_TEST_SIZE` / `RF_RANDOM_STATE` | Split y semilla para el Random Forest |
-| `CHEMPROP_SPLIT` / `CHEMPROP_SPLIT_TYPE` | Split y tipo de partición para Chemprop |
-| `CHEMPROP_MAX_EPOCHS` / `CHEMPROP_BATCH_SIZE` / `CHEMPROP_NUM_WORKERS` | Hiperparámetros de entrenamiento de Chemprop |
-| `BASE_OUTPUT_DIR` | Carpeta base donde se guardan todos los resultados (`output/`) |
+| `BIOACTIVITY_TYPE` | Bioactivity type to fetch from ChEMBL (`IC50`, `Ki`, `EC50`, etc.) |
+| `ORGANISM` | Target organism (default `"Homo sapiens"`) |
+| `TARGET_TYPE` | ChEMBL target type (default `"SINGLE PROTEIN"`) |
+| `CONVERT_TO_PIC50` | Whether to convert the raw value to pIC50 (only applies to IC50/Ki) |
+| `ACTIVE_THRESHOLD` / `INACTIVE_THRESHOLD` | pIC50 thresholds for classifying active/inactive/intermediate |
+| `MORGAN_RADIUS` / `MORGAN_NBITS` | Morgan fingerprint parameters used for the RF model |
+| `RF_TEST_SIZE` / `RF_RANDOM_STATE` | Split and seed for Random Forest |
+| `CHEMPROP_SPLIT` / `CHEMPROP_SPLIT_TYPE` | Split and split type for Chemprop |
+| `CHEMPROP_MAX_EPOCHS` / `CHEMPROP_BATCH_SIZE` / `CHEMPROP_NUM_WORKERS` | Chemprop training hyperparameters |
+| `BASE_OUTPUT_DIR` | Base folder where all results are saved (`output/`) |
 
-`config.py` también expone funciones helper (`get_output_dir`, `get_models_dir`, `get_plots_dir`) que crean automáticamente las carpetas de salida por receptor.
-
----
-
-## Descripción de cada script
-
-### `step1_fetch_chembl.py` — Descarga de datos
-
-- Busca en ChEMBL las dianas que coincidan con el nombre del receptor (`search_target`).
-- Selecciona automáticamente la mejor diana humana de tipo `SINGLE PROTEIN` según el score de ChEMBL (`select_best_target`), con fallback a cualquier diana humana si no hay coincidencia exacta.
-- Descarga los datos de actividad biológica (`fetch_activities`) para el tipo de bioactividad indicado (por defecto `IC50`).
-- Limpia los datos crudos (`clean_raw_data`): elimina filas sin valor o sin SMILES, convierte el valor a numérico y conserva solo mediciones con relación exacta (`=`).
-- Guarda el resultado en `output/<receptor>/01_raw_data.csv`.
-
-### `step2_preprocess.py` — Preprocesado
-
-- Elimina filas con SMILES o valores faltantes.
-- Elimina SMILES duplicados (se conserva la primera aparición).
-- Elimina sales (`_strip_salts`): conserva el fragmento más largo al dividir el SMILES por `.`.
-- Valida y canoniza cada SMILES con RDKit (`_validate_and_canonicalize`), descartando moléculas inválidas.
-- Vuelve a eliminar duplicados tras la canonización.
-- Recorta valores extremos (`norm_value`): cualquier valor mayor a 100,000,000 se acota a 10,000,000.
-- Si el tipo de bioactividad es `IC50` o `Ki`, convierte el valor a **pIC50** (`_to_pic50 = -log10(valor en M)`).
-- Clasifica cada molécula como `active` / `inactive` / `intermediate` según los umbrales de `config.py` (o mediante partición por mediana si no se convierte a pIC50).
-- Guarda el resultado en `output/<receptor>/02_preprocessed.csv`.
-
-### `step3_eda_lipinski.py` — EDA y descriptores de Lipinski
-
-- Calcula los descriptores de Lipinski para cada molécula: peso molecular (MW), LogP, número de donadores de puente de hidrógeno y número de aceptores.
-- Descarta moléculas cuyo SMILES no pueda ser interpretado por RDKit.
-- Ejecuta pruebas estadísticas de **Mann-Whitney U** comparando los descriptores de Lipinski entre moléculas activas e inactivas (umbral de pIC50 = 6.5), guardando el resultado en `03_mannwhitney_lipinski.json`.
-- Genera varios gráficos en `output/<receptor>/plots/`:
-  - Distribución del valor objetivo (`target_distribution.png`)
-  - Frecuencia de clases de bioactividad (`class_frequency.png`)
-  - Boxplots de los descriptores de Lipinski por clase (`lipinski_boxplots.png`)
-  - Espacio químico MW vs LogP (`chemical_space.png`)
-  - Mapa de calor de correlaciones (`correlation_heatmap.png`)
-- Guarda el dataset enriquecido en `output/<receptor>/03_eda_lipinski.csv`.
-
-### `step4_rf_model.py` — Modelo Random Forest
-
-- Genera huellas moleculares de Morgan (radio y nº de bits configurables) a partir de los SMILES limpios.
-- Divide los datos en entrenamiento/prueba (80/20 por defecto).
-- Realiza validación cruzada de 5 particiones (K-Fold) sobre el conjunto de entrenamiento y guarda los resultados en `rf_cross_validation.json`.
-- Entrena un `RandomForestRegressor` (100 árboles).
-- Calcula métricas de desempeño (R², RMSE, MAE) tanto en entrenamiento como en prueba.
-- Genera gráficos de predicho vs. real y de distribución de residuos.
-- Ejecuta un análisis de interpretabilidad **SHAP** (TreeExplainer) sobre una muestra del conjunto de prueba, identificando los 20 bits de la huella molecular más influyentes y generando un gráfico resumen (`rf_shap_summary.png`).
-- Ejecuta una prueba de **Y-randomization** (50 permutaciones) para verificar que el modelo no se basa en correlaciones casuales.
-- Serializa el modelo entrenado (`rf_model.joblib`) y toda la configuración/metadatos en `rf_config.json`, dentro de `output/<receptor>/models/`.
-
-### `step5_chemprop_model.py` — Modelo Chemprop (MPNN)
-
-- Construye `MoleculeDatapoint`s a partir de los SMILES y el valor objetivo.
-- Divide los datos en entrenamiento/validación/prueba (80/10/10 por defecto, configurable en `config.py`).
-- Featuriza las moléculas con `SimpleMoleculeMolGraphFeaturizer`.
-- Define la arquitectura: `BondMessagePassing` → `MeanAggregation` → `RegressionFFN`.
-- Entrena con PyTorch Lightning durante el número de épocas configurado, guardando el mejor checkpoint según `val_loss`.
-- Evalúa el modelo sobre el conjunto de prueba y genera un gráfico de predicho vs. real.
-- Guarda las métricas (`chemprop_metrics.json`) y la configuración de entrenamiento (`chemprop_config.json`) en `output/<receptor>/models/`.
-
-> Este paso es opcional y puede omitirse con `--skip_chemprop` si no se dispone de las dependencias de Chemprop/Lightning/Torch, o si solo se necesita el modelo Random Forest.
-
-### `predict.py` — Predicción sobre moléculas nuevas
-
-Permite usar los modelos ya entrenados (RF y, opcionalmente, Chemprop) para predecir la bioactividad de moléculas nuevas a partir de un CSV de entrada.
-
-- El CSV de entrada debe tener (por defecto) las columnas `Molecule` y `Canonical SMILES` (nombres configurables con `--molecule_col` y `--smiles_col`).
-- Preprocesa cada SMILES igual que en el Paso 2 (eliminación de sales + canonización).
-- Genera la huella de Morgan y predice con el modelo Random Forest (`rf_model.joblib`).
-- Calcula la explicación SHAP de cada predicción individual, generando:
-  - Un gráfico *waterfall* de SHAP por molécula.
-  - Una imagen de la molécula con los átomos/enlaces resaltados según su contribución SHAP (rojo = aumenta la predicción, azul = la disminuye).
-- Si no se indica `--skip_chemprop`, busca automáticamente el checkpoint de Chemprop más reciente y también genera predicciones con ese modelo.
-- Clasifica cada predicción como `active` / `inactive` / `intermediate` según los umbrales configurados (solo si el target es pIC50).
-- Guarda los resultados en un JSON detallado y en un CSV resumen, dentro de `output/<receptor>/predictions/`.
-
-### `run_pipeline.py` — Orquestador
-
-- Ejecuta en orden los pasos 1 a 5 (o 1 a 4 si se usa `--skip_chemprop`), importando cada módulo de forma perezosa.
-- Cada paso se ejecuta de forma segura: si falla, se registra el error pero el pipeline continúa con el resto de pasos y genera un resumen final.
-- Configura un logger que escribe simultáneamente en consola y en `output/<receptor>/pipeline.log`.
-- Al finalizar, imprime un resumen con el estado (éxito/fallo) y el tiempo de ejecución de cada paso.
-
-### `config.py` — Configuración central
-
-Ya descrito en la sección [Configuración](#configuración-configpy) más arriba.
+`config.py` also exposes helper functions (`get_output_dir`, `get_models_dir`, `get_plots_dir`) that automatically create per-receptor output folders.
 
 ---
 
-## Cómo usar el pipeline
+## Script Descriptions
 
-### Ejecución completa (recomendado)
+### `step1_fetch_chembl.py` — Data Fetching
+
+- Searches ChEMBL for targets matching the receptor name (`search_target`).
+- Automatically selects the best human `SINGLE PROTEIN` target based on the ChEMBL score (`select_best_target`), falling back to any human target if there's no exact match.
+- Downloads bioactivity data (`fetch_activities`) for the requested bioactivity type (default `IC50`).
+- Cleans the raw data (`clean_raw_data`): drops rows with missing value or SMILES, converts the value to numeric, and keeps only measurements with an exact (`=`) relation.
+- Saves the result to `output/<receptor>/01_raw_data.csv`.
+
+### `step2_preprocess.py` — Preprocessing
+
+- Drops rows with missing SMILES or values.
+- Removes duplicate SMILES (keeps the first occurrence).
+- Strips salts (`_strip_salts`): keeps the longest fragment when splitting the SMILES on `.`.
+- Validates and canonicalizes each SMILES with RDKit (`_validate_and_canonicalize`), discarding invalid molecules.
+- Removes duplicates again after canonicalization.
+- Caps extreme values (`norm_value`): any value greater than 100,000,000 is clipped to 10,000,000.
+- If the bioactivity type is `IC50` or `Ki`, converts the value to **pIC50** (`_to_pic50 = -log10(value in M)`).
+- Classifies each molecule as `active` / `inactive` / `intermediate` based on the thresholds in `config.py` (or via a median split if not converting to pIC50).
+- Saves the result to `output/<receptor>/02_preprocessed.csv`.
+
+### `step3_eda_lipinski.py` — EDA and Lipinski Descriptors
+
+- Computes Lipinski descriptors for every molecule: molecular weight (MW), LogP, number of hydrogen bond donors, and number of acceptors.
+- Drops molecules whose SMILES can't be parsed by RDKit.
+- Runs **Mann-Whitney U** statistical tests comparing Lipinski descriptors between active and inactive molecules (pIC50 threshold = 6.5), saving the result to `03_mannwhitney_lipinski.json`.
+- Generates several plots in `output/<receptor>/plots/`:
+  - Target value distribution (`target_distribution.png`)
+  - Bioactivity class frequency (`class_frequency.png`)
+  - Boxplots of Lipinski descriptors by class (`lipinski_boxplots.png`)
+  - Chemical space MW vs LogP (`chemical_space.png`)
+  - Correlation heatmap (`correlation_heatmap.png`)
+- Saves the enriched dataset to `output/<receptor>/03_eda_lipinski.csv`.
+
+### `step4_rf_model.py` — Random Forest Model
+
+- Generates Morgan fingerprints (configurable radius and number of bits) from the cleaned SMILES.
+- Splits the data into train/test sets (80/20 by default).
+- Runs 5-fold cross-validation on the training set and saves the results to `rf_cross_validation.json`.
+- Trains a `RandomForestRegressor` (100 trees).
+- Computes performance metrics (R², RMSE, MAE) on both the training and test sets.
+- Generates predicted-vs-actual and residual distribution plots.
+- Runs a **SHAP** interpretability analysis (TreeExplainer) on a sample of the test set, identifying the 20 most influential fingerprint bits and producing a summary plot (`rf_shap_summary.png`).
+- Runs a **Y-randomization** test (50 permutations) to verify the model isn't based on chance correlations.
+- Serializes the trained model (`rf_model.joblib`) and all configuration/metadata to `rf_config.json`, inside `output/<receptor>/models/`.
+
+### `step5_chemprop_model.py` — Chemprop (MPNN) Model
+
+- Builds `MoleculeDatapoint`s from the SMILES and the target value.
+- Splits the data into train/validation/test sets (80/10/10 by default, configurable in `config.py`).
+- Featurizes the molecules with `SimpleMoleculeMolGraphFeaturizer`.
+- Defines the architecture: `BondMessagePassing` → `MeanAggregation` → `RegressionFFN`.
+- Trains with PyTorch Lightning for the configured number of epochs, saving the best checkpoint based on `val_loss`.
+- Evaluates the model on the test set and generates a predicted-vs-actual plot.
+- Saves the metrics (`chemprop_metrics.json`) and training configuration (`chemprop_config.json`) to `output/<receptor>/models/`.
+
+> This step is optional and can be skipped with `--skip_chemprop` if you don't have the Chemprop/Lightning/Torch dependencies, or if you only need the Random Forest model.
+
+### `predict.py` — Predicting New Molecules
+
+Uses the already-trained models (RF and, optionally, Chemprop) to predict the bioactivity of new molecules from an input CSV.
+
+- The input CSV must have (by default) the columns `Molecule` and `Canonical SMILES` (names configurable via `--molecule_col` and `--smiles_col`).
+- Preprocesses each SMILES the same way as in Step 2 (salt stripping + canonicalization).
+- Generates the Morgan fingerprint and predicts with the Random Forest model (`rf_model.joblib`).
+- Computes a SHAP explanation for each individual prediction, generating:
+  - A SHAP *waterfall* plot per molecule.
+  - An image of the molecule with atoms/bonds highlighted according to their SHAP contribution (red = increases the prediction, blue = decreases it).
+- Unless `--skip_chemprop` is passed, it automatically looks for the most recent Chemprop checkpoint and also generates predictions with that model.
+- Classifies each prediction as `active` / `inactive` / `intermediate` based on the configured thresholds (only when the target is pIC50).
+- Saves the results to a detailed JSON file and a summary CSV, inside `output/<receptor>/predictions/`.
+
+### `run_pipeline.py` — Orchestrator
+
+- Runs steps 1 through 5 in order (or 1 through 4 if `--skip_chemprop` is used), lazily importing each module.
+- Each step runs safely: if it fails, the error is logged but the pipeline continues with the remaining steps and produces a final summary.
+- Sets up a logger that writes simultaneously to the console and to `output/<receptor>/pipeline.log`.
+- At the end, prints a summary with the status (success/failure) and execution time of each step.
+
+### `config.py` — Central Configuration
+
+Already described in the [Configuration](#configuration-configpy) section above.
+
+---
+
+## How to Use the Pipeline
+
+### Full run (recommended)
 
 ```bash
 python run_pipeline.py --receptor FGFR1
 ```
 
-Esto ejecuta los 5 pasos en orden para el receptor `FGFR1`, usando el tipo de bioactividad por defecto (`IC50`, definido en `config.py`).
+This runs all 5 steps in order for the `FGFR1` receptor, using the default bioactivity type (`IC50`, defined in `config.py`).
 
-### Especificando el tipo de bioactividad
+### Specifying the bioactivity type
 
 ```bash
 python run_pipeline.py --receptor FGFR1 --bioactivity_type IC50
 ```
 
-### Omitiendo el modelo Chemprop (solo Random Forest)
+### Skipping the Chemprop model (Random Forest only)
 
 ```bash
 python run_pipeline.py --receptor EGFR --skip_chemprop
 ```
 
-### Especificando un directorio de salida distinto (informativo)
+### Specifying a different output directory (informational)
 
 ```bash
-python run_pipeline.py --receptor FGFR1 --output_dir mi_carpeta_resultados
+python run_pipeline.py --receptor FGFR1 --output_dir my_results_folder
 ```
 
-### Ejecutar los pasos de forma individual
+### Running each step individually
 
-También se puede ejecutar cada script por separado, siempre que los archivos de entrada del paso anterior ya existan en `output/<receptor>/`:
+You can also run each script separately, as long as the input files from the previous step already exist in `output/<receptor>/`:
 
 ```bash
 python step1_fetch_chembl.py --receptor FGFR1
@@ -231,17 +231,17 @@ python step5_chemprop_model.py --receptor FGFR1
 
 ---
 
-## Archivos de salida generados
+## Generated Output Files
 
-Todo se guarda dentro de `output/<RECEPTOR>/`:
+Everything is saved under `output/<RECEPTOR>/`:
 
 ```
 output/<RECEPTOR>/
-├── pipeline.log                       # Log completo de la ejecución
-├── 01_raw_data.csv                    # Datos crudos de ChEMBL
-├── 02_preprocessed.csv                # Datos limpios + pIC50 + clase
-├── 03_eda_lipinski.csv                # Datos + descriptores de Lipinski
-├── 03_mannwhitney_lipinski.json       # Resultados de pruebas estadísticas
+├── pipeline.log                       # Full execution log
+├── 01_raw_data.csv                    # Raw ChEMBL data
+├── 02_preprocessed.csv                # Clean data + pIC50 + class
+├── 03_eda_lipinski.csv                # Data + Lipinski descriptors
+├── 03_mannwhitney_lipinski.json       # Statistical test results
 ├── plots/
 │   ├── target_distribution.png
 │   ├── class_frequency.png
@@ -269,51 +269,51 @@ output/<RECEPTOR>/
     ├── <input>_predictions.json
     ├── <input>_predictions.csv
     └── plots/
-        ├── 0001_<molécula>_rf_waterfall.png
-        └── 0001_<molécula>_morgan_highlights.png
+        ├── 0001_<molecule>_rf_waterfall.png
+        └── 0001_<molecule>_morgan_highlights.png
 ```
 
 ---
 
-## Predicción sobre moléculas nuevas
+## Predicting New Molecules
 
-Una vez entrenados los modelos (Pasos 4 y, opcionalmente, 5), se puede predecir la bioactividad de moléculas nuevas:
+Once the models have been trained (Steps 4 and, optionally, 5), you can predict the bioactivity of new molecules:
 
 ```bash
-python predict.py --receptor FGFR1 --input_csv candidatos.csv
+python predict.py --receptor FGFR1 --input_csv candidates.csv
 ```
 
-El CSV de entrada (`candidatos.csv`) debe tener, como mínimo, estas columnas:
+The input CSV (`candidates.csv`) must have, at minimum, these columns:
 
 | Molecule | Canonical SMILES |
 |---|---|
-| Compuesto_1 | CCOc1ccc2nc(...)... |
-| Compuesto_2 | ... |
+| Compound_1 | CCOc1ccc2nc(...)... |
+| Compound_2 | ... |
 
-Opciones adicionales:
+Additional options:
 
 ```bash
 python predict.py \
     --receptor FGFR1 \
-    --input_csv candidatos.csv \
-    --output_json resultados.json \
-    --output_csv resultados.csv \
+    --input_csv candidates.csv \
+    --output_json results.json \
+    --output_csv results.csv \
     --skip_chemprop \
     --top_k 10 \
     --highlight_top_k 1
 ```
 
-- `--skip_chemprop`: solo genera predicciones con el modelo Random Forest.
-- `--top_k`: número de bits de la huella de Morgan a reportar por molécula.
-- `--highlight_top_k`: número de bits a resaltar visualmente sobre la estructura molecular.
-- `--smiles_col` / `--molecule_col`: permiten usar nombres de columna distintos a los de por defecto.
+- `--skip_chemprop`: only generates predictions with the Random Forest model.
+- `--top_k`: number of Morgan fingerprint bits to report per molecule.
+- `--highlight_top_k`: number of bits to highlight visually on the molecular structure.
+- `--smiles_col` / `--molecule_col`: allow using column names different from the defaults.
 
 ---
 
-## Notas y consideraciones
+## Notes and Considerations
 
-- El pipeline crea automáticamente todas las carpetas necesarias (`output/<receptor>/`, `models/`, `plots/`, `predictions/`), por lo que no es necesario crearlas a mano.
-- La conversión a pIC50 solo se aplica cuando el tipo de bioactividad es `IC50` o `Ki` **y** `CONVERT_TO_PIC50 = True` en `config.py`. Para otros tipos (por ejemplo `Inhibition`), la clasificación activo/inactivo se realiza mediante partición por mediana.
-- El Paso 5 (Chemprop) requiere GPU o CPU con suficiente capacidad de cómputo, además de las librerías `chemprop`, `lightning` y `torch`. Si no se necesita este modelo, usar `--skip_chemprop` en `run_pipeline.py`.
-- Los umbrales de clasificación (`ACTIVE_THRESHOLD`, `INACTIVE_THRESHOLD`) y los hiperparámetros de los modelos pueden ajustarse libremente en `config.py` sin tocar el resto del código.
-- `predict.py` reutiliza el archivo `rf_config.json` generado en el Paso 4 (incluyendo el conjunto de fondo para SHAP), por lo que es importante haber ejecutado al menos el Paso 4 antes de predecir moléculas nuevas.
+- The pipeline automatically creates all the necessary folders (`output/<receptor>/`, `models/`, `plots/`, `predictions/`), so there's no need to create them manually.
+- pIC50 conversion only applies when the bioactivity type is `IC50` or `Ki` **and** `CONVERT_TO_PIC50 = True` in `config.py`. For other types (e.g. `Inhibition`), active/inactive classification is done via a median split.
+- Step 5 (Chemprop) requires a GPU or a CPU with enough compute power, plus the `chemprop`, `lightning`, and `torch` libraries. If you don't need this model, use `--skip_chemprop` with `run_pipeline.py`.
+- Classification thresholds (`ACTIVE_THRESHOLD`, `INACTIVE_THRESHOLD`) and model hyperparameters can be freely adjusted in `config.py` without touching the rest of the code.
+- `predict.py` reuses the `rf_config.json` file generated in Step 4 (including the SHAP background set), so Step 4 must have been run at least once before predicting new molecules.
