@@ -26,8 +26,21 @@ import pandas as pd
 from sklearn.metrics import r2_score
 
 import config
+import ad_uncertainty as adu
                   
                   
+def _predictions_to_array(prediction_batches, torch) -> np.ndarray:
+    """Flatten a list of chemprop/lightning prediction batches into a 1-D numpy array."""
+    arrays = []
+    for batch in prediction_batches:
+        if isinstance(batch, (list, tuple)):
+            batch = batch[0]
+        if not isinstance(batch, torch.Tensor):
+            batch = torch.as_tensor(batch)
+        arrays.append(batch.detach().cpu().numpy().reshape(-1))
+    return np.concatenate(arrays)
+
+
 def plot_pred_vs_actual(y_actual, y_pred, target_col: str, plots_dir: str) -> str:
     """Save a predicted-vs-actual plot for Chemprop test predictions."""
     r2 = r2_score(y_actual, y_pred)
@@ -178,15 +191,7 @@ def run(receptor_name: str, bioactivity_type: str | None = None) -> str:
         weights_only = False,
         return_predictions=True,
     )
-    prediction_arrays = []
-    for batch in prediction_batches:
-        if isinstance(batch, (list, tuple)):
-            batch = batch[0]
-        if not isinstance(batch, torch.Tensor):
-            batch = torch.as_tensor(batch)
-        prediction_arrays.append(batch.detach().cpu().numpy().reshape(-1))
-    
-    y_pred_val = np.concatenate(prediction_arrays)
+    y_pred_val = _predictions_to_array(prediction_batches, torch)
     #y_val = np.array([d.y for d in test_data[0]], dtype=float).reshape(-1)
 
     plot_pred_vs_actual(y_val, y_pred_val, target_col, plots_dir)
@@ -208,6 +213,131 @@ def run(receptor_name: str, bioactivity_type: str | None = None) -> str:
     with open(cfg_path, "w") as f:
         json.dump(chemprop_config, f, indent=2)
     print(f"  Config → {cfg_path}")
+
+    # ── Applicability Domain + Mondrian conformal prediction ───
+    # (target_col here is the true test-set target; y_val/y_pred_val above are test)
+    print("  Computing applicability domain (Tanimoto AD10) for Chemprop...")
+
+    train_smis = smis[train_indices[0]]
+    val_smis = smis[val_indices[0]]
+    test_smis = smis[test_indices[0]]
+    y_train_true = np.array([d.y for d in train_data[0]], dtype=float).reshape(-1)
+    y_val_true = np.array([d.y for d in val_data[0]], dtype=float).reshape(-1)
+    y_test_true = y_val  # test set, per the (confusingly named) variable above
+
+    train_fps, train_fp_valid = adu.smiles_list_to_fp_matrix(
+        train_smis, radius=config.MORGAN_RADIUS, n_bits=config.MORGAN_NBITS
+    )
+    val_fps, val_fp_valid = adu.smiles_list_to_fp_matrix(
+        val_smis, radius=config.MORGAN_RADIUS, n_bits=config.MORGAN_NBITS
+    )
+    test_fps, test_fp_valid = adu.smiles_list_to_fp_matrix(
+        test_smis, radius=config.MORGAN_RADIUS, n_bits=config.MORGAN_NBITS
+    )
+    if not train_fp_valid.all():
+        print(f"    Warning: {(~train_fp_valid).sum()} training SMILES could not be "
+              f"fingerprinted for AD purposes; excluding from the AD reference set.")
+    train_fps_valid_only = train_fps[train_fp_valid]
+
+    train_ad10_loo = adu.compute_ad10(
+        train_fps_valid_only, train_fps_valid_only, k=config.AD10_K, exclude_self=True
+    )
+    ad10_thresh = adu.ad_threshold(train_ad10_loo, percentile=config.AD10_PERCENTILE)
+    val_ad10 = adu.compute_ad10(val_fps, train_fps_valid_only, k=config.AD10_K, exclude_self=False)
+    test_ad10 = adu.compute_ad10(test_fps, train_fps_valid_only, k=config.AD10_K, exclude_self=False)
+    in_ad_val = val_ad10 >= ad10_thresh
+    in_ad_test = test_ad10 >= ad10_thresh
+    print(f"    AD10 threshold ({config.AD10_PERCENTILE}th pct of training LOO AD10): {ad10_thresh:.4f}")
+    print(f"    Test set in-AD: {in_ad_test.sum()}/{len(in_ad_test)}")
+
+    adu.plot_ad_distribution(
+        train_ad10_loo, test_ad10, ad10_thresh,
+        os.path.join(plots_dir, "chemprop_ad10_distribution.png"), "Chemprop",
+    )
+
+    # Chemprop predictions on train (fit-quality only) and val (CP calibration)
+    train_pred_loader = data.build_dataloader(
+        train_dset, num_workers=config.CHEMPROP_NUM_WORKERS, shuffle=False
+    )
+    train_pred_batches = trainer.predict(
+        mpnn, dataloaders=train_pred_loader, ckpt_path="best", weights_only=False,
+        return_predictions=True,
+    )
+    y_pred_train = _predictions_to_array(train_pred_batches, torch)
+
+    val_pred_batches = trainer.predict(
+        mpnn, dataloaders=val_loader, ckpt_path="best", weights_only=False,
+        return_predictions=True,
+    )
+    y_pred_val_cal = _predictions_to_array(val_pred_batches, torch)
+
+    # NOTE: the validation set was used for checkpoint selection (monitor="val_loss"),
+    # so reusing it as the conformal calibration set introduces a mild, commonly-accepted
+    # optimism in coverage rather than a strictly held-out calibration split.
+    cal_scores = np.abs(y_val_true - y_pred_val_cal)  # no per-sample sigma for Chemprop -> plain |residual|
+    cp_calibration = adu.mondrian_calibrate(
+        cal_scores, in_ad_val, alpha=config.CP_ALPHA, min_stratum_size=config.CP_MIN_STRATUM_SIZE,
+    )
+    print(f"    Mondrian conformal calibration (alpha={config.CP_ALPHA}): {cp_calibration}")
+
+    q_test = np.where(in_ad_test, cp_calibration["q_in"], cp_calibration["q_out"])
+    lower_test, upper_test, width_test = adu.conformal_interval(y_pred_val, q_test, sigma=None)
+    test_coverage = adu.empirical_coverage(y_test_true, lower_test, upper_test)
+    print(f"    Empirical test coverage @ {1 - config.CP_ALPHA:.0%} target: {test_coverage:.3f}")
+
+    coverage_rows = adu.coverage_sweep(
+        cal_scores, in_ad_val, y_test_true, y_pred_val, in_ad_test,
+        sigma_test=None, beta=0.0, alphas=config.CP_COVERAGE_SWEEP_ALPHAS,
+        min_stratum_size=config.CP_MIN_STRATUM_SIZE,
+    )
+
+    # ── AD / uncertainty plots ──────────────────────────────────
+    test_rmse = float(np.sqrt(np.mean((y_test_true - y_pred_val) ** 2)))
+    std_residuals = (y_test_true - y_pred_val) / (test_rmse + 1e-9)
+    adu.plot_ad_williams(
+        test_ad10, std_residuals, ad10_thresh,
+        os.path.join(plots_dir, "chemprop_ad10_williams.png"), "Chemprop",
+    )
+    adu.plot_pred_vs_actual_ci(
+        y_train_true, y_pred_train, y_test_true, y_pred_val, lower_test, upper_test,
+        target_col, os.path.join(plots_dir, "chemprop_pred_vs_actual_ci.png"), "Chemprop",
+    )
+    test_abs_error = np.abs(y_test_true - y_pred_val)
+    adu.plot_metric_vs_error_binned(
+        test_ad10, test_abs_error, "AD10 similarity",
+        os.path.join(plots_dir, "chemprop_ad10_vs_error.png"), "Chemprop",
+    )
+    adu.plot_coverage_calibration(
+        coverage_rows, os.path.join(plots_dir, "chemprop_coverage_calibration.png"), "Chemprop",
+    )
+    adu.plot_ad_reliability_heatmap(
+        in_ad_test, test_abs_error, config.AD_RELIABILITY_ERROR_THRESHOLD,
+        os.path.join(plots_dir, "chemprop_ad_reliability_heatmap.png"), "Chemprop",
+    )
+    adu.plot_width_vs_metric(
+        width_test, test_ad10, "AD10 similarity",
+        os.path.join(plots_dir, "chemprop_interval_width_vs_ad10.png"), "Chemprop",
+    )
+
+    npz_path, adu_json_path = adu.save_ad_uncertainty_artifacts(
+        out_dir=models_dir,
+        prefix="chemprop",
+        train_fps=train_fps_valid_only,
+        ad_k=config.AD10_K,
+        ad_threshold_value=ad10_thresh,
+        calibration=cp_calibration,
+        beta=0.0,
+        train_ad10=train_ad10_loo,
+        extra_json={
+            "target_col": target_col,
+            "test_coverage_at_target_alpha": test_coverage,
+            "coverage_sweep": coverage_rows,
+            "morgan_radius": config.MORGAN_RADIUS,
+            "morgan_nbits": config.MORGAN_NBITS,
+            "calibration_set": "validation (used in checkpoint selection; mild optimism expected)",
+        },
+    )
+    print(f"    AD/uncertainty artifacts -> {adu_json_path}  |  {npz_path}")
 
     best_ckpt = checkpointing.best_model_path or checkpointing.last_model_path
     print(f"  Best checkpoint → {best_ckpt}")

@@ -45,6 +45,22 @@ CHEMPROP_BATCH_SIZE = 64
 CHEMPROP_NUM_WORKERS = 0
 
 # ─────────────────────────────────────────────────────────────
+# Applicability domain (Tanimoto AD10) settings
+# ─────────────────────────────────────────────────────────────
+AD10_K = 10                   # number of nearest neighbors
+AD10_PERCENTILE = 5           # low-percentile cutoff of training AD10 distribution
+
+# ─────────────────────────────────────────────────────────────
+# Conformal prediction settings
+# ─────────────────────────────────────────────────────────────
+CP_ALPHA = 0.05                # -> 95% target coverage
+CP_MIN_STRATUM_SIZE = 20       # min calibration points per Mondrian (AD) stratum
+CP_COVERAGE_SWEEP_ALPHAS = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05, 0.02, 0.01]
+# Error threshold (in target-column units) used only for the AD x reliability
+# heatmap diagnostic plot; does not affect AD or CP calibration itself.
+AD_RELIABILITY_ERROR_THRESHOLD = 1.0  # e.g. 1 log unit of pIC50
+
+# ─────────────────────────────────────────────────────────────
 # Output directory helpers
 # ─────────────────────────────────────────────────────────────
 BASE_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")

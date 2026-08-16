@@ -32,6 +32,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split, cross_val_score, KFold 
 import config
+import ad_uncertainty as adu
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -195,6 +196,101 @@ def run(receptor_name: str, bioactivity_type: str | None = None) -> str:
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"    Plot → {path}")
+
+    # ── Applicability Domain (Tanimoto AD10) ───────────────────
+    print("  Computing applicability domain (Tanimoto AD10)...")
+    train_ad10_loo = adu.compute_ad10(X_train, X_train, k=config.AD10_K, exclude_self=True)
+    ad10_thresh = adu.ad_threshold(train_ad10_loo, percentile=config.AD10_PERCENTILE)
+    test_ad10 = adu.compute_ad10(X_test, X_train, k=config.AD10_K, exclude_self=False)
+    in_ad_test = test_ad10 >= ad10_thresh
+    print(f"    AD10 threshold ({config.AD10_PERCENTILE}th pct of training LOO AD10): {ad10_thresh:.4f}")
+    print(f"    Test set in-AD: {in_ad_test.sum()}/{len(in_ad_test)}")
+
+    adu.plot_ad_distribution(
+        train_ad10_loo, test_ad10, ad10_thresh,
+        os.path.join(plots_dir, "rf_ad10_distribution.png"), "RF",
+    )
+
+    # ── RF uncertainty: OOB calibration + full-ensemble test/deploy std ──
+    print("  Computing OOB predictions/std for conformal calibration...")
+    oob_mean, oob_std, oob_valid = adu.rf_oob_mean_std(rf, X_train)
+    beta = float(np.median(oob_std[oob_valid]))  # regularization to avoid divide-by-~0
+    print(f"    OOB-valid training samples: {oob_valid.sum()}/{len(oob_valid)}  |  beta={beta:.4f}")
+
+    cal_scores = np.abs(y_train[oob_valid] - oob_mean[oob_valid]) / (oob_std[oob_valid] + beta)
+    in_ad_train_oob = (train_ad10_loo >= ad10_thresh)[oob_valid]
+
+    cp_calibration = adu.mondrian_calibrate(
+        cal_scores, in_ad_train_oob, alpha=config.CP_ALPHA,
+        min_stratum_size=config.CP_MIN_STRATUM_SIZE,
+    )
+    print(f"    Mondrian conformal calibration (alpha={config.CP_ALPHA}): {cp_calibration}")
+
+    # Full-ensemble mean/std for the test set (as would be done for new molecules)
+    test_ensemble_mean, test_ensemble_std = adu.rf_ensemble_mean_std(rf, X_test)
+    q_test = np.where(in_ad_test, cp_calibration["q_in"], cp_calibration["q_out"])
+    lower_test, upper_test, width_test = adu.conformal_interval(
+        test_ensemble_mean, q_test, sigma=test_ensemble_std, beta=beta
+    )
+    test_coverage = adu.empirical_coverage(y_test, lower_test, upper_test)
+    print(f"    Empirical test coverage @ {1 - config.CP_ALPHA:.0%} target: {test_coverage:.3f}")
+
+    coverage_rows = adu.coverage_sweep(
+        cal_scores, in_ad_train_oob, y_test, test_ensemble_mean, in_ad_test,
+        sigma_test=test_ensemble_std, beta=beta, alphas=config.CP_COVERAGE_SWEEP_ALPHAS,
+        min_stratum_size=config.CP_MIN_STRATUM_SIZE,
+    )
+
+    # ── AD / uncertainty plots ──────────────────────────────────
+    std_residuals = (y_test - y_pred_test) / (metrics["test_rmse"] + 1e-9)
+    adu.plot_ad_williams(
+        test_ad10, std_residuals, ad10_thresh,
+        os.path.join(plots_dir, "rf_ad10_williams.png"), "RF",
+    )
+    adu.plot_pred_vs_actual_ci(
+        y_train, y_pred_train, y_test, test_ensemble_mean, lower_test, upper_test,
+        target_col, os.path.join(plots_dir, "rf_pred_vs_actual_ci.png"), "RF",
+    )
+    test_abs_error = np.abs(y_test - test_ensemble_mean)
+    adu.plot_metric_vs_error_binned(
+        test_ad10, test_abs_error, "AD10 similarity",
+        os.path.join(plots_dir, "rf_ad10_vs_error.png"), "RF",
+    )
+    adu.plot_metric_vs_error_binned(
+        test_ensemble_std, test_abs_error, "RF tree-to-tree std (uncertainty)",
+        os.path.join(plots_dir, "rf_uncertainty_vs_error.png"), "RF",
+    )
+    adu.plot_coverage_calibration(
+        coverage_rows, os.path.join(plots_dir, "rf_coverage_calibration.png"), "RF",
+    )
+    adu.plot_ad_reliability_heatmap(
+        in_ad_test, test_abs_error, config.AD_RELIABILITY_ERROR_THRESHOLD,
+        os.path.join(plots_dir, "rf_ad_reliability_heatmap.png"), "RF",
+    )
+    adu.plot_width_vs_metric(
+        width_test, test_ensemble_std, "RF tree-to-tree std (uncertainty)",
+        os.path.join(plots_dir, "rf_interval_width_vs_uncertainty.png"), "RF",
+    )
+
+    # ── Save AD / uncertainty artifacts for reuse in predict.py ─
+    npz_path, adu_json_path = adu.save_ad_uncertainty_artifacts(
+        out_dir=models_dir,
+        prefix="rf",
+        train_fps=X_train,
+        ad_k=config.AD10_K,
+        ad_threshold_value=ad10_thresh,
+        calibration=cp_calibration,
+        beta=beta,
+        train_ad10=train_ad10_loo,
+        extra_json={
+            "target_col": target_col,
+            "test_coverage_at_target_alpha": test_coverage,
+            "coverage_sweep": coverage_rows,
+            "morgan_radius": config.MORGAN_RADIUS,
+            "morgan_nbits": config.MORGAN_NBITS,
+        },
+    )
+    print(f"    AD/uncertainty artifacts -> {adu_json_path}  |  {npz_path}")
 
     # SHAP analysis
     print("  Running SHAP analysis...")
@@ -370,6 +466,12 @@ def run(receptor_name: str, bioactivity_type: str | None = None) -> str:
             "analysis_data": shap_data_path,
             "feature_names": feature_names,
             "sample_size": int(shap_sample_size),
+        },
+        "applicability_domain_uncertainty": {
+            "artifact_json": adu_json_path,
+            "train_fps_npz": npz_path,
+            "ad10_threshold": ad10_thresh,
+            "test_coverage_at_target_alpha": test_coverage,
         },
     }
     config_path = os.path.join(models_dir, "rf_config.json")

@@ -31,6 +31,7 @@ from rdkit.Chem import Draw, rdFingerprintGenerator
 from PIL import Image, ImageDraw, ImageFont
 
 import config
+import ad_uncertainty as adu
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -483,6 +484,19 @@ def run(
     if not rf_path.exists():
         raise FileNotFoundError(f"Random Forest model not found: {rf_path}")
 
+    # ── AD / uncertainty artifacts (per-model; see step4/step5) ─
+    rf_ad_json_path = models_dir / "rf_ad_uncertainty.json"
+    chemprop_ad_json_path = models_dir / "chemprop_ad_uncertainty.json"
+    rf_ad = adu.load_ad_uncertainty_artifacts(str(rf_ad_json_path)) if rf_ad_json_path.exists() else None
+    chemprop_ad = (
+        adu.load_ad_uncertainty_artifacts(str(chemprop_ad_json_path))
+        if chemprop_ad_json_path.exists() else None
+    )
+    if rf_ad is None:
+        print("  Note: rf_ad_uncertainty.json not found; RF predictions will skip AD/CI reporting.")
+    if chemprop_ad is None:
+        print("  Note: chemprop_ad_uncertainty.json not found; Chemprop predictions will skip AD/CI reporting.")
+
     df = pd.read_csv(input_path)
     missing = [col for col in (molecule_col, smiles_col) if col not in df.columns]
     if missing:
@@ -531,7 +545,34 @@ def run(
     X = np.asarray(fps, dtype=np.float64) if fps else np.empty((0, n_bits), dtype=np.float64)
 
     if len(X):
-        rf_predictions = rf_model.predict(X)
+        rf_ens_mean, rf_ens_std = adu.rf_ensemble_mean_std(rf_model, X)
+        rf_predictions = rf_ens_mean  # equivalent to rf_model.predict(X)
+
+        rf_ad10 = rf_in_ad = rf_lower = rf_upper = rf_width = None
+        if rf_ad is not None:
+            rf_ad10 = adu.compute_ad10(
+                X, rf_ad["train_fps"].astype(np.float64), k=rf_ad["ad_k"], exclude_self=False
+            )
+            rf_in_ad = rf_ad10 >= rf_ad["ad_threshold"]
+            q = np.where(rf_in_ad, rf_ad["calibration"]["q_in"], rf_ad["calibration"]["q_out"])
+            rf_lower, rf_upper, rf_width = adu.conformal_interval(
+                rf_ens_mean, q, sigma=rf_ens_std, beta=rf_ad["beta"]
+            )
+
+            if rf_ad.get("train_ad10") is not None:
+                adu.plot_new_molecules_ad10(
+                    rf_ad["train_ad10"], rf_ad10, rf_ad["ad_threshold"],
+                    plots_dir / "rf_new_molecules_ad10.png", "RF", names=names,
+                )
+            adu.plot_ad10_ranked(
+                rf_ad10, names, rf_ad["ad_threshold"],
+                plots_dir / "rf_new_molecules_ad10_ranked.png", "RF",
+            )
+            adu.plot_chemical_space_pca(
+                rf_ad["train_fps"], X, rf_in_ad,
+                plots_dir / "rf_new_molecules_chemical_space.png", "RF", names=names,
+            )
+
         explanations = explain_rf_predictions(
             rf_model=rf_model,
             X=X,
@@ -550,6 +591,13 @@ def run(
             pred = float(rf_predictions[pos])
             records[record_idx]["rf_prediction"] = pred
             records[record_idx]["rf_predicted_class"] = classify_prediction(pred, target_col)
+            records[record_idx]["rf_uncertainty_tree_std"] = float(rf_ens_std[pos])
+            if rf_ad is not None:
+                records[record_idx]["rf_ad10"] = float(rf_ad10[pos])
+                records[record_idx]["rf_in_applicability_domain"] = bool(rf_in_ad[pos])
+                records[record_idx]["rf_prediction_interval_lower"] = float(rf_lower[pos])
+                records[record_idx]["rf_prediction_interval_upper"] = float(rf_upper[pos])
+                records[record_idx]["rf_prediction_interval_width"] = float(rf_width[pos])
             records[record_idx]["interpretation"] = explanations[pos]
 
     chemprop_path = None
@@ -563,6 +611,45 @@ def run(
                 print(f"[Predict] Predict Chemprop model with checkpoint: {chemprop_path}")
                 
                 chemprop_predictions = predict_chemprop(chemprop_path, clean_smiles)
+
+                chemprop_ad10 = chemprop_in_ad = chemprop_lower = chemprop_upper = chemprop_width = None
+                if chemprop_ad is not None:
+                    cp_radius = chemprop_ad.get("morgan_radius", radius)
+                    cp_nbits = chemprop_ad.get("morgan_nbits", n_bits)
+                    cp_fps, cp_fp_valid = adu.smiles_list_to_fp_matrix(
+                        clean_smiles, radius=cp_radius, n_bits=cp_nbits
+                    )
+                    chemprop_ad10 = adu.compute_ad10(
+                        cp_fps, chemprop_ad["train_fps"].astype(np.float64),
+                        k=chemprop_ad["ad_k"], exclude_self=False,
+                    )
+                    chemprop_in_ad = chemprop_ad10 >= chemprop_ad["ad_threshold"]
+                    q = np.where(
+                        chemprop_in_ad,
+                        chemprop_ad["calibration"]["q_in"],
+                        chemprop_ad["calibration"]["q_out"],
+                    )
+                    preds_arr = np.array(
+                        [p if p is not None else np.nan for p in chemprop_predictions], dtype=float
+                    )
+                    chemprop_lower, chemprop_upper, chemprop_width = adu.conformal_interval(
+                        preds_arr, q, sigma=None
+                    )
+
+                    if chemprop_ad.get("train_ad10") is not None:
+                        adu.plot_new_molecules_ad10(
+                            chemprop_ad["train_ad10"], chemprop_ad10, chemprop_ad["ad_threshold"],
+                            plots_dir / "chemprop_new_molecules_ad10.png", "Chemprop", names=names,
+                        )
+                    adu.plot_ad10_ranked(
+                        chemprop_ad10, names, chemprop_ad["ad_threshold"],
+                        plots_dir / "chemprop_new_molecules_ad10_ranked.png", "Chemprop",
+                    )
+                    adu.plot_chemical_space_pca(
+                        chemprop_ad["train_fps"], cp_fps, chemprop_in_ad,
+                        plots_dir / "chemprop_new_molecules_chemical_space.png", "Chemprop", names=names,
+                    )
+
                 for pos, record_idx in enumerate(valid_rows):
                     records[record_idx]["chemprop_prediction"] = chemprop_predictions[pos]
                     records[record_idx]["chemprop_predicted_class"] = (
@@ -570,6 +657,13 @@ def run(
                         if chemprop_predictions[pos] is not None
                         else None
                     )
+                    if chemprop_ad is not None:
+                        records[record_idx]["chemprop_ad10"] = float(chemprop_ad10[pos])
+                        records[record_idx]["chemprop_in_applicability_domain"] = bool(chemprop_in_ad[pos])
+                        if chemprop_predictions[pos] is not None:
+                            records[record_idx]["chemprop_prediction_interval_lower"] = float(chemprop_lower[pos])
+                            records[record_idx]["chemprop_prediction_interval_upper"] = float(chemprop_upper[pos])
+                            records[record_idx]["chemprop_prediction_interval_width"] = float(chemprop_width[pos])
             except Exception as exc:
                 chemprop_error = f"Chemprop prediction failed: {exc}"
 
@@ -588,6 +682,10 @@ def run(
             "n_input_rows": int(len(df)),
             "n_valid_molecules": int(len(valid_rows)),
             "plots_dir": str(plots_dir),
+            "rf_ad_uncertainty_artifact": str(rf_ad_json_path) if rf_ad is not None else None,
+            "chemprop_ad_uncertainty_artifact": str(chemprop_ad_json_path) if chemprop_ad is not None else None,
+            "rf_ad10_threshold": rf_ad["ad_threshold"] if rf_ad is not None else None,
+            "chemprop_ad10_threshold": chemprop_ad["ad_threshold"] if chemprop_ad is not None else None,
         },
         "predictions": records,
     }
@@ -601,7 +699,16 @@ def run(
             "SMILES": record.get("input_smiles"),
             "Clean SMILES": record.get("clean_smiles"),
             "RF prediction": record.get("rf_prediction"),
+            "RF AD10": record.get("rf_ad10"),
+            "RF in AD": record.get("rf_in_applicability_domain"),
+            "RF uncertainty (tree std)": record.get("rf_uncertainty_tree_std"),
+            "RF interval lower": record.get("rf_prediction_interval_lower"),
+            "RF interval upper": record.get("rf_prediction_interval_upper"),
             "Chemprop prediction": record.get("chemprop_prediction"),
+            "Chemprop AD10": record.get("chemprop_ad10"),
+            "Chemprop in AD": record.get("chemprop_in_applicability_domain"),
+            "Chemprop interval lower": record.get("chemprop_prediction_interval_lower"),
+            "Chemprop interval upper": record.get("chemprop_prediction_interval_upper"),
         }
         for record in records
     ]
