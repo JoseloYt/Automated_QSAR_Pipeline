@@ -87,6 +87,10 @@ The flow: builds `MoleculeDatapoint` objects from the SMILES and target, splits 
 
 Just like the Random Forest, it also computes an applicability domain (using Morgan fingerprints just for that part, since Chemprop itself doesn't need them) and a conformal prediction interval calibrated on the validation set — with the caveat that the same validation set was used to pick the best checkpoint, so the reported coverage may be slightly optimistic (this is noted in the output JSON as a reminder).
 
+### `step6_terpene_filter.py`
+
+This step was added because of the scope of the study. Terpene molecules are underrepresented in bioactivity datasets, like ChEMBL. It filters the selected dataset by the top n molecules with the highest score of `terpene similarity`, `NP-likeness`, `terpene features`, and, optionally, similarity with the `target molecules` (the ones to be predicted). Then, the user may re-train a model with the new filtered dataset, so its applicability domain would cover terpene or natural molecules.
+
 ### `ad_uncertainty.py`
 
 Shared module with all the applicability domain and uncertainty logic, so the Random Forest and Chemprop use exactly the same criteria (instead of two slightly different versions of the same calculation). The key pieces:
